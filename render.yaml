@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: movie-recommendation-system
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: >
+      pip install -r requirements.txt &&
+      pip install kagglehub nltk &&
+      python training/run_training.py &&
+      cp -r models/* training/models/ &&
+      python manage.py collectstatic --noinput &&
+      python manage.py migrate
+    startCommand: "gunicorn movie_recommendation.wsgi:application"
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: ALLOWED_HOSTS
+        sync: false
+      - key: MODEL_DIR
+        value: "./training/models"
+      - key: KAGGLE_USERNAME
+        sync: false
+      - key: KAGGLE_KEY
+        sync: false
+    healthCheckPath: /api/health/
