@@ -9,6 +9,21 @@ from pathlib import Path
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _csv_env(name, default=''):
+    return [
+        value.strip()
+        for value in os.environ.get(name, default).split(',')
+        if value.strip()
+    ]
+
+
+def _host_from_env(name):
+    value = os.environ.get(name)
+    if not value:
+        return None
+    return value.removeprefix('https://').removeprefix('http://').split('/')[0]
+
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get(
     'SECRET_KEY', 
@@ -19,12 +34,25 @@ SECRET_KEY = os.environ.get(
 DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 't')
 
 # Allowed hosts configuration
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+ALLOWED_HOSTS = _csv_env('ALLOWED_HOSTS', 'localhost,127.0.0.1')
 
 # Render deployment support
 RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
 if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+
+# Vercel deployment support
+for vercel_host_var in (
+    'VERCEL_URL',
+    'VERCEL_BRANCH_URL',
+    'VERCEL_PROJECT_PRODUCTION_URL',
+):
+    vercel_host = _host_from_env(vercel_host_var)
+    if vercel_host and vercel_host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(vercel_host)
+
+if os.environ.get('VERCEL') and '.vercel.app' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('.vercel.app')
 
 ADMIN_ENABLED = os.environ.get('ADMIN_ENABLED', 'False').lower() in ('true', '1', 't')
 
@@ -54,13 +82,39 @@ MIDDLEWARE = [
 ]
 
 # CORS Configuration
-CORS_ALLOWED_ORIGINS = os.environ.get(
-    'CORS_ALLOWED_ORIGINS', 
+CORS_ALLOWED_ORIGINS = _csv_env(
+    'CORS_ALLOWED_ORIGINS',
     'http://localhost:3000,http://127.0.0.1:3000'
-).split(',')
+)
+
+for vercel_host_var in (
+    'VERCEL_URL',
+    'VERCEL_BRANCH_URL',
+    'VERCEL_PROJECT_PRODUCTION_URL',
+):
+    vercel_host = _host_from_env(vercel_host_var)
+    vercel_origin = f'https://{vercel_host}' if vercel_host else None
+    if vercel_origin and vercel_origin not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(vercel_origin)
+
+CSRF_TRUSTED_ORIGINS = _csv_env(
+    'CSRF_TRUSTED_ORIGINS',
+    ''
+)
+
+for vercel_host_var in (
+    'VERCEL_URL',
+    'VERCEL_BRANCH_URL',
+    'VERCEL_PROJECT_PRODUCTION_URL',
+):
+    vercel_host = _host_from_env(vercel_host_var)
+    vercel_origin = f'https://{vercel_host}' if vercel_host else None
+    if vercel_origin and vercel_origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(vercel_origin)
 
 # Security Settings
 if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
@@ -223,7 +277,11 @@ REST_FRAMEWORK = {
 MODEL_DIR = os.environ.get('MODEL_DIR', os.path.join(BASE_DIR, 'training/models'))
 
 # Create models directory if it doesn't exist
-Path(MODEL_DIR).mkdir(parents=True, exist_ok=True)
+try:
+    Path(MODEL_DIR).mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Serverless deployments may expose the source bundle as read-only.
+    pass
 
 
 # Default primary key field type

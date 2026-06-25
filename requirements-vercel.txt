@@ -1,0 +1,11 @@
+# Vercel runtime dependencies only. Training dependencies stay in requirements.txt.
+Django==6.0.4
+numpy==2.3.5
+scipy==1.16.3
+pandas>=2.3.3
+pyarrow>=22.0.0
+whitenoise[brotli]==6.11.0
+python-decouple>=3.8
+djangorestframework==3.16.1
+django-extensions==4.1
+django-cors-headers==4.9.0

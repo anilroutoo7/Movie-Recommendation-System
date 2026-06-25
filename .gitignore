@@ -64,3 +64,5 @@ training/models/
 
 # Cached datasets
 *.cache
+
+.vercel

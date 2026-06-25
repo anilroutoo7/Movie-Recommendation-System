@@ -342,6 +342,33 @@ The project includes a `render.yaml` for one-click deployment:
 3. Set environment variables (`SECRET_KEY`, `DEBUG=False`, etc.)
 4. Deploy
 
+### Vercel
+
+The project includes `vercel.json`, `api/index.py`, `.python-version`, and
+`requirements-vercel.txt` for Vercel's Python runtime.
+
+1. Push the repo to GitHub.
+2. Import the repo in Vercel.
+3. Set these Vercel environment variables:
+
+```bash
+SECRET_KEY=your-production-secret
+DEBUG=False
+MODEL_DIR=training/models
+```
+
+4. Deploy.
+
+Vercel will install the smaller runtime dependency set from
+`requirements-vercel.txt` with `uv`, run `python manage.py collectstatic --noinput`,
+and route all requests through `api/index.py`.
+
+Important model note: `training/models/` is generated locally and gitignored.
+Git-based Vercel deployments will not include the recommender artifacts unless
+you add a separate artifact delivery step. The current local model includes a
+large `similarity_matrix.npz`; keep Vercel's Python function bundle size limits
+in mind if you choose to package model files with the app.
+
 ### Heroku
 
 ```bash

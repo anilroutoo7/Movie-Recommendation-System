@@ -11,7 +11,7 @@ from difflib import get_close_matches
 
 import pandas as pd
 import numpy as np
-from scipy.sparse import load_npz
+from scipy.sparse import load_npz, issparse
 import json
 from django.conf import settings
 from django.http import JsonResponse
@@ -56,8 +56,10 @@ class MovieRecommender:
         if progress_callback:
             progress_callback(40)
         if (self.model_dir / 'similarity_matrix.npz').exists():
-            self.similarity_matrix = load_npz(self.model_dir / 'similarity_matrix.npz').toarray()
+            # Keep matrix in sparse CSR format to avoid loading the full dense matrix into memory
+            self.similarity_matrix = load_npz(self.model_dir / 'similarity_matrix.npz').tocsr()
         else:
+            # Legacy dense numpy format
             self.similarity_matrix = np.load(self.model_dir / 'similarity_matrix.npy')
         if progress_callback:
             progress_callback(65)
@@ -102,7 +104,14 @@ class MovieRecommender:
         source_movie = self.metadata.iloc[movie_idx]
         
         # Get similarity scores
-        sim_scores = list(enumerate(self.similarity_matrix[movie_idx]))
+        # Retrieve similarity scores for the source movie.
+        # If the matrix is sparse, fetch a single row and convert only that row to dense.
+        if issparse(self.similarity_matrix):
+            sim_row = self.similarity_matrix.getrow(movie_idx).toarray().ravel()
+        else:
+            sim_row = self.similarity_matrix[movie_idx]
+
+        sim_scores = list(enumerate(sim_row))
         sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:]  # Exclude self
         
         recommendations = []

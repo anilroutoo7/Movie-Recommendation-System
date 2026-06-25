@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "uv pip install --system -r requirements-vercel.txt",
+  "buildCommand": "python manage.py collectstatic --noinput",
+  "functions": {
+    "api/index.py": {
+      "excludeFiles": "{assets/**,**/__pycache__/**,**/*.pyc,**/*.pyo,**/*.log,db.sqlite3,htmlcov/**,.pytest_cache/**}"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index.py"
+    }
+  ]
+}
