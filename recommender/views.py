@@ -8,6 +8,17 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 from difflib import get_close_matches
+import urllib.request
+import tempfile
+import shutil
+import zipfile
+import tarfile
+try:
+    import boto3
+    HAVE_BOTO3 = True
+except Exception:
+    boto3 = None
+    HAVE_BOTO3 = False
 
 # Lazy imports for heavy numeric libraries. When deploying to Vercel
 # we may omit numpy/scipy/pandas and run in a small demo mode.
@@ -30,6 +41,97 @@ from django.shortcuts import render
 from django.views.decorators.http import require_http_methods
 
 logger = logging.getLogger(__name__)
+
+
+def _download_and_extract_model(url: str, dest: Path) -> None:
+    """Download a model archive or file from `url` and extract/save into `dest`.
+
+    Supports .zip, .tar.gz/.tgz, or single-file artifacts (.npz, .npy, .json).
+    Uses only Python stdlib so no extra runtime deps are required.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # Create a temporary file to download into
+    with tempfile.NamedTemporaryFile(delete=False) as tmpf:
+        tmp_path = Path(tmpf.name)
+    try:
+        logger.info(f"Downloading model from {url} to {tmp_path}...")
+        with urllib.request.urlopen(url) as resp, open(tmp_path, 'wb') as out:
+            shutil.copyfileobj(resp, out)
+
+        fname = url.split('?')[0].split('/')[-1].lower()
+        if fname.endswith('.zip'):
+            logger.info("Extracting zip model archive...")
+            with zipfile.ZipFile(tmp_path, 'r') as z:
+                z.extractall(dest)
+        elif fname.endswith('.tar.gz') or fname.endswith('.tgz') or fname.endswith('.tar'):
+            logger.info("Extracting tar model archive...")
+            with tarfile.open(tmp_path, 'r:*') as t:
+                t.extractall(dest)
+        else:
+            # Single-file: move into dest with original filename
+            target = dest / fname
+            shutil.move(str(tmp_path), str(target))
+            logger.info(f"Saved model file to {target}")
+            return
+
+        logger.info(f"Model extracted to {dest}")
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
+def _download_and_extract_s3(s3_url: str, dest: Path) -> None:
+    """Download from s3://bucket/key using boto3 to a temp file then extract.
+
+    Requires `boto3` to be available in the runtime. S3 credentials are read
+    from the environment (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) or
+    from the instance profile if running in AWS.
+    """
+    if not HAVE_BOTO3:
+        raise RuntimeError("boto3 is not available in the runtime to download S3 models")
+
+    # Parse s3://bucket/key
+    assert s3_url.startswith('s3://')
+    parts = s3_url[5:].split('/', 1)
+    bucket = parts[0]
+    key = parts[1] if len(parts) > 1 else ''
+
+    dest.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmpf:
+        tmp_path = Path(tmpf.name)
+    try:
+        s3 = boto3.client('s3')
+        logger.info(f"Downloading s3://{bucket}/{key} to {tmp_path}...")
+        with open(tmp_path, 'wb') as out:
+            s3.download_fileobj(bucket, key, out)
+
+        fname = key.split('/')[-1].lower()
+        if fname.endswith('.zip'):
+            logger.info("Extracting zip model archive from S3...")
+            with zipfile.ZipFile(tmp_path, 'r') as z:
+                z.extractall(dest)
+        elif fname.endswith('.tar.gz') or fname.endswith('.tgz') or fname.endswith('.tar'):
+            logger.info("Extracting tar model archive from S3...")
+            with tarfile.open(tmp_path, 'r:*') as t:
+                t.extractall(dest)
+        else:
+            target = dest / fname
+            shutil.move(str(tmp_path), str(target))
+            logger.info(f"Saved model file to {target}")
+            return
+
+        logger.info(f"Model extracted to {dest}")
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
 
 # Global cache for recommender system
 _RECOMMENDER = None
@@ -203,11 +305,23 @@ def _load_model_in_background():
     
     # Check for model directory (configurable via settings or environment)
     model_dir = getattr(settings, 'MODEL_DIR', os.environ.get('MODEL_DIR', 'models'))
-    
-    # Fallback to static directory if models directory doesn't exist
-    if not Path(model_dir).exists():
+    model_path = Path(model_dir)
+
+    # If a remote MODEL_URL is provided and model dir doesn't exist, download it
+    model_url = os.environ.get('MODEL_URL') or os.environ.get('MODEL_S3_URL')
+    if not model_path.exists() and model_url:
+        try:
+            logger.info(f"MODEL_DIR missing; attempting download from MODEL_URL={model_url}")
+            _download_and_extract_model(model_url, model_path)
+        except Exception as e:
+            logger.error(f"Failed to download model from URL: {e}")
+
+    # Fallback to static directory if models directory still doesn't exist
+    if not model_path.exists():
         model_dir = 'static'
         logger.warning(f"Model directory not found, using static directory")
+    else:
+        model_dir = str(model_path)
     
     try:
         def progress_callback(progress):
