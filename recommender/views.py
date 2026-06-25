@@ -9,9 +9,20 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from difflib import get_close_matches
 
-import pandas as pd
-import numpy as np
-from scipy.sparse import load_npz, issparse
+# Lazy imports for heavy numeric libraries. When deploying to Vercel
+# we may omit numpy/scipy/pandas and run in a small demo mode.
+try:
+    import pandas as pd
+    import numpy as np
+    from scipy.sparse import load_npz, issparse
+    HAVE_NUMERIC = True
+except Exception:
+    pd = None
+    np = None
+    load_npz = None
+    def issparse(x):
+        return False
+    HAVE_NUMERIC = False
 import json
 from django.conf import settings
 from django.http import JsonResponse
@@ -45,13 +56,33 @@ class MovieRecommender:
         global _MODEL_LOAD_PROGRESS
         logger.info(f"Loading models from {self.model_dir}...")
         
+        # If numeric libraries are not available or we're using the static demo
+        # model, load the lightweight JSON-demo model instead.
+        if (not HAVE_NUMERIC) or str(self.model_dir) == 'static':
+            demo_path = Path('static') / 'demo_model.json'
+            if demo_path.exists():
+                if progress_callback:
+                    progress_callback(10)
+                with open(demo_path, 'r', encoding='utf-8') as f:
+                    demo = json.load(f)
+                # metadata as list of dicts
+                self.metadata = demo.get('metadata', [])
+                # similarity as nested lists
+                self.similarity_matrix = demo.get('similarity', [])
+                self.title_to_idx = demo.get('title_to_idx', {})
+                self.config = {'n_movies': demo.get('n_movies', len(self.metadata))}
+                if progress_callback:
+                    progress_callback(100)
+                logger.info(f"Loaded demo model with {self.config['n_movies']} movies")
+                return
+
         # Load metadata (25%)
         if progress_callback:
             progress_callback(10)
         self.metadata = pd.read_parquet(self.model_dir / 'movie_metadata.parquet')
         if progress_callback:
             progress_callback(25)
-        
+
         # Load similarity matrix (sparse or dense) (50%)
         if progress_callback:
             progress_callback(40)
@@ -63,19 +94,19 @@ class MovieRecommender:
             self.similarity_matrix = np.load(self.model_dir / 'similarity_matrix.npy')
         if progress_callback:
             progress_callback(65)
-        
+
         # Load title mapping (75%)
         with open(self.model_dir / 'title_to_idx.json', 'r') as f:
             self.title_to_idx = json.load(f)
         if progress_callback:
             progress_callback(80)
-        
+
         # Load config (100%)
         with open(self.model_dir / 'config.json', 'r') as f:
             self.config = json.load(f)
         if progress_callback:
             progress_callback(100)
-        
+
         logger.info(f"Loaded {self.config['n_movies']:,} movies successfully")
     
     def find_movie(self, title: str) -> Optional[str]:
@@ -101,7 +132,9 @@ class MovieRecommender:
             return {'error': f"Movie '{movie_title}' not found", 'suggestions': self.search_movies(movie_title, 5)}
         
         movie_idx = self.title_to_idx[matched_title]
-        source_movie = self.metadata.iloc[movie_idx]
+        # Support both pandas DataFrame metadata and demo-mode list metadata
+        demo_mode = isinstance(self.metadata, list)
+        source_movie = self.metadata[movie_idx] if demo_mode else self.metadata.iloc[movie_idx]
         
         # Get similarity scores
         # Retrieve similarity scores for the source movie.
@@ -119,32 +152,42 @@ class MovieRecommender:
             if len(recommendations) >= n:
                 break
             
-            movie = self.metadata.iloc[idx]
-            
+            movie = self.metadata[idx] if demo_mode else self.metadata.iloc[idx]
+
+            # Helper to safely read fields in demo vs pandas modes
+            def _get(field, default=None):
+                try:
+                    return movie.get(field, default) if demo_mode else movie[field]
+                except Exception:
+                    return default
+
             # Rating filter
-            if min_rating and movie['vote_average'] < min_rating:
+            rating_val = _get('vote_average')
+            if min_rating and rating_val is not None and rating_val < min_rating:
                 continue
-            
+
+            genres = _get('genres', [])
+
             recommendations.append({
-                'title': movie['title'],
-                'release_date': movie['release_date'] if pd.notna(movie['release_date']) else 'Unknown',
-                'production': movie['primary_company'] if pd.notna(movie['primary_company']) else 'Unknown',
-                'genres': ', '.join(movie['genres'][:3]) if isinstance(movie['genres'], list) else 'N/A',
-                'rating': f"{movie['vote_average']:.1f}/10" if pd.notna(movie['vote_average']) else 'N/A',
-                'votes': f"{movie['vote_count']:,}" if pd.notna(movie['vote_count']) else 'N/A',
+                'title': _get('title', 'Unknown'),
+                'release_date': _get('release_date', 'Unknown') if _get('release_date') else 'Unknown',
+                'production': _get('primary_company', 'Unknown') if _get('primary_company') else 'Unknown',
+                'genres': ', '.join(genres[:3]) if isinstance(genres, list) else 'N/A',
+                'rating': f"{rating_val:.1f}/10" if rating_val is not None else 'N/A',
+                'votes': f"{_get('vote_count'):,}" if _get('vote_count') else 'N/A',
                 'similarity_score': f"{score:.3f}",
-                'imdb_id': movie['imdb_id'] if pd.notna(movie['imdb_id']) else None,
-                'poster_url': f"https://image.tmdb.org/t/p/w500{movie['poster_path']}" if pd.notna(movie['poster_path']) else None,
-                'google_link': f"https://www.google.com/search?q={'+'.join(movie['title'].split())}+movie",
-                'imdb_link': f"https://www.imdb.com/title/{movie['imdb_id']}" if pd.notna(movie['imdb_id']) else None
+                'imdb_id': _get('imdb_id'),
+                'poster_url': f"https://image.tmdb.org/t/p/w500{_get('poster_path')}" if _get('poster_path') else None,
+                'google_link': f"https://www.google.com/search?q={'+'.join(_get('title','').split())}+movie",
+                'imdb_link': f"https://www.imdb.com/title/{_get('imdb_id')}" if _get('imdb_id') else None
             })
         
         return {
             'query_movie': matched_title,
             'source_movie': {
-                'production': source_movie['primary_company'] if pd.notna(source_movie['primary_company']) else 'Unknown',
-                'rating': f"{source_movie['vote_average']:.1f}/10" if pd.notna(source_movie['vote_average']) else 'N/A',
-                'genres': ', '.join(source_movie['genres'][:3]) if isinstance(source_movie['genres'], list) else 'N/A'
+                'production': source_movie['primary_company'] if (not demo_mode and pd.notna(source_movie['primary_company'])) or (demo_mode and source_movie.get('primary_company')) else 'Unknown',
+                'rating': f"{source_movie['vote_average']:.1f}/10" if ((not demo_mode and pd.notna(source_movie['vote_average'])) or (demo_mode and source_movie.get('vote_average') is not None)) else 'N/A',
+                'genres': ', '.join(source_movie['genres'][:3]) if (isinstance(source_movie, dict) and isinstance(source_movie.get('genres'), list)) or (not demo_mode and isinstance(source_movie['genres'], list)) else 'N/A'
             },
             'recommendations': recommendations
         }
