@@ -22,6 +22,7 @@ python-decouple>=3.8
 
 # API & Validation
 djangorestframework==3.16.1
+boto3>=1.26.0
 
 # Development Tools
 django-extensions==4.1
